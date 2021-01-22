@@ -1,0 +1,1 @@
+SELECT path FROM library WHERE path = ?;

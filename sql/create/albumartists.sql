@@ -1,0 +1,4 @@
+CREATE TABLE IF NOT EXISTS albumartists (
+    id INTEGER PRIMARY KEY,
+    name VARCHAR 
+);
