@@ -1,15 +1,16 @@
 # Todo
 
-- DB:
-  - SQLite tables
-  - Inserts
-  - Search functions
-- CLI argument parsing
-  - playlist creation options
-- playlist creation
-  - By BPM
-  - Restrict
-    - Artist
-    - Year (Between)
-    - Album Artist
-  - Length
+- [x] DB:
+  - [x] SQLite tables
+  - [x] Inserts
+  - [x] Search functions
+  - [x] Remove Duplicates
+- [x] CLI argument parsing
+  - [x] playlist creation options
+- [x] playlist creation
+  - [x] By BPM
+  - [x] Restrict
+    - [x] Artist
+    - [x] Year (Between)
+    - [x] Album Artist
+  - [x] Length

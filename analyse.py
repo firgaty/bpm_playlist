@@ -1,18 +1,35 @@
-import argparse
 import os
 import re
 import subprocess
-from typing import Any, Iterator, Union
+import pathlib
+from typing import Iterator
 
 from mutagen.easyid3 import EasyID3
 from mutagen.flac import FLAC
 
-from flacduration import get_flac_duration
+from database import DB
+from user_types import MetaDict
+from awesome_progress_bar import ProgressBar
 
-bpm_pattern = re.compile(r"(\d+|\d+.\d+) BPM$")
+
+bpm_pattern = re.compile(r"(\d+|\d+\.\d+) BPM$")
+time_pattern = re.compile(r"(\d+\.\d+)")
 
 
-def exec_bpm_tag(path: str) -> str:
+def extract_pattern(output: str, pattern) -> int:
+    """Transforms a string representing a float to an int."""
+    match = pattern.search(output)
+
+    try:
+        if match:
+            return round(float(match.group(1)))
+    except ValueError:
+        raise ValueError()
+    return 0
+
+
+def extract_bpm(path: str) -> str:
+    """Executes `bpm-tag` program to extract BPM information."""
     out = subprocess.Popen(
         [
             "bpm-tag",
@@ -23,63 +40,132 @@ def exec_bpm_tag(path: str) -> str:
         stderr=subprocess.STDOUT,
     )
     stdout, _ = out.communicate()
-    return stdout.decode("utf-8")
+    try:
+        return extract_pattern(stdout.decode("utf-8"), bpm_pattern)
+    except ValueError:
+        print("ERROR BPM")
+        print(path)
 
 
-def extract_bpm(output: str) -> int:
-    match = bpm_pattern.search(output)
-    if match:
-        return round(float(match.group(1)))
-    return 0
+def extract_length(path: str) -> float:
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            path,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    try:
+        return extract_pattern(result.stdout.decode("utf-8"), time_pattern)
+    except ValueError:
+        print("ERROR Length")
+        print(path)
 
 
 def date2year(date: str) -> int:
+    """Transform date string to year int."""
     if len(date) == 4:
         return int(date)
 
     return int(date[:4])
 
 
+def format_genres(genres: str) -> str:
+    """Replaces `/` and spaces by `;`"""
+    return genres.replace("/", ";").replace(" & ", ";").replace(" ", ";")
+
+
+def format_artists(artists: str) -> str:
+    if not artists.find(";"):
+        return artists
+
+    a = (
+        artists.replace(" feat. ", ";")
+        .replace(" featuring ", ";")
+        .replace(" feat ", ";")
+        .replace(" & ", ";")
+    )
+
+    a = a.split(";")
+    out = [a[0]]
+
+    for e in a[1:]:
+        e = e.split(" (from")[0]
+        e = e.split(" from")[0]
+        out.append(e)
+
+    return ";".join(out)
+
+
 LABELS = [
     ("title", str),
     ("albumartist", str),
-    ("artist", str),
+    ("artist", format_artists),
     ("composer", str),
-    ("genre", str),
+    ("genre", format_genres),
     ("artistsort", str),
     ("album", str),
     ("bpm", lambda x: int(round(float(x)))),
-    ("length", int),
 ]
 
 
-def meta(path: str) -> dict[str, Union[str, int]]:
-    meta = {}
-    m: dict[str, Any] = None
+def meta(path: str) -> MetaDict:
+    """Extract meta of a file of path `path` to a dict."""
+    meta = {"path": path}
+    m = None
 
     if path.endswith(".flac"):
         m = FLAC(path)
-        meta["year"] = int(m["originalyear"][0])
 
-        for name, func in LABELS:
-            if name in m and m[name] is not None:
-                meta[name] = func(m[name][0])
+        for name, func in LABELS + [("originalyear", date2year)]:
+            if name in m and m[name] is not None and m[name] != []:
+                try:
+                    meta[name] = func(m[name][0])
+                except KeyError:
+                    meta[name] = None
+                except IndexError:
+                    meta[name] = None
+            else:
+                meta[name] = None
 
-        if "length" not in meta:
-            meta["length"] = round(get_flac_duration(path))
+        meta["year"] = meta["originalyear"]
+        del meta["originalyear"]
 
     elif path.endswith(".mp3"):
         m = EasyID3(path)
-        meta["year"] = date2year(m["date"][0])
 
-        for name, func in LABELS:
-            if name in m and m[name] != []:
-                meta[name] = func(m[name][0])
+        for name, func in LABELS + [("originaldate", date2year), ('date', date2year)]:
+            if name in m and m[name] is not None and m[name] != []:
+                try:
+                    meta[name] = func(m[name][0])
+                except KeyError:
+                    meta[name] = None
+                except IndexError:
+                    meta[name] = None
+            else:
+                meta[name] = None
+
+        if meta['originaldate'] is not None:
+            meta["year"] = meta["originaldate"]
+        else:
+            meta["year"] = meta["date"]
+
+        del meta["originaldate"]
+        del meta["date"]
     else:
-        return {}
+        return meta
 
-    if "bpm" not in meta:
-        meta["bpm"] = extract_bpm(exec_bpm_tag(path))
+    if meta["bpm"] is None:
+        meta["bpm"] = extract_bpm(path)
+
+    meta["length"] = extract_length(path)
 
     return meta
 
@@ -95,25 +181,69 @@ def walk_path(
                     break
 
 
-def meta_iter(path: str) -> Iterator[dict[str, Any]]:
-    for p in walk_path(path):
-        yield meta(p)
+def count_files(path: str, file_extentions: list[str] = [".mp3", ".flac"]):
+    return sum(1 for _ in walk_path(path, file_extentions))
 
 
-def main():
+def meta_iter(path: str, check_exists=True, progress_bar=True) -> Iterator[MetaDict]:
 
-    parser = argparse.ArgumentParser(prog="analyzer")
-    parser.add_argument("-p", "--path", help="path to scan", nargs=1)
-    args = vars(parser.parse_args())
+    if progress_bar:
+        file_count = count_files(path)
+        bar = ProgressBar(file_count, "Scanning", use_eta=True)
 
-    path = args["path"][0]
-    print(path)
+        try:
+            for p in walk_path(path):
+                txt = f" {pathlib.Path(p).name[:25]}"
+                if not check_exists or check_exists and not DB.path_exists(p):
+                    yield meta(p)
+                bar.iter(txt)
+        except KeyboardInterrupt:
+            bar.stop()
+        bar.wait()
 
-    for m in meta_iter(path):
-        for k in m:
-            print(f"{k}: {m[k]}")
+    else:
+        for p in walk_path(path):
+            if not check_exists or check_exists and not DB.path_exists(p):
+                yield meta(p)
 
-        print("---")
+
+def scan_path(path: str, *args, **kargs) -> None:
+    count = 0
+    entries = []
+
+    for m in meta_iter(path, *args, **kargs):
+        entries.append(m)
+        count += 1
+        if count % 10 == 0:
+            DB.add_entries(entries)
+            entries = []
+
+        if count >= 50:
+            DB.commit_import()
+            count = 0
+
+    DB.add_entries(entries)
+    DB.commit_import()
 
 
-main()
+def verify_integrity(progress_bar=True) -> None:
+    # TODO: test
+    """Deletes entries if their path is no longer valid"""
+    if progress_bar:
+        file_count = DB.count_entries()
+        bar = ProgressBar(file_count, "Scanning", use_eta=True)
+
+        try:
+            for p in DB.paths():
+                txt = f" {pathlib.Path(p).name[:25]}"
+                if not pathlib.Path(p).exists:
+                    DB.delete_entry(p)
+                bar.iter(txt)
+        except KeyboardInterrupt:
+            bar.stop()
+        bar.wait()
+
+    else:
+        for p in DB.paths():
+            if not pathlib.Path(p).exists:
+                DB.delete_entry(p)
